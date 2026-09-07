@@ -6,13 +6,13 @@ plugins {
 android {
     namespace = "com.abplus.botchchat"
     compileSdk {
-        version = release(37)
+        version = release(36)
     }
 
     defaultConfig {
         applicationId = "com.abplus.botchchat"
         minSdk = 34
-        targetSdk = 37
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
