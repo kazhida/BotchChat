@@ -36,7 +36,8 @@ import java.util.Locale
 internal fun OfflineVoiceInputButton(
     enabled: Boolean,
     onRecognized: (String) -> Unit,
-    onStatus: (String?) -> Unit
+    onStatus: (String?) -> Unit,
+    onStart: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -170,8 +171,10 @@ internal fun OfflineVoiceInputButton(
             } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
             ) {
+                onStart()
                 start()
             } else {
+                onStart()
                 permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         }

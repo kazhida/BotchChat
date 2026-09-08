@@ -24,6 +24,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -36,6 +38,16 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import com.abplus.botchchat.data.OfflineSpeechOutput
+import com.abplus.botchchat.data.ReplySpeechEvent
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -66,6 +78,34 @@ fun ChatScreen(
     var inputText by remember { mutableStateOf("") }
     var voiceInputStatus by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val speechOutput = remember(context) { OfflineSpeechOutput(context) }
+    val speechStatus by speechOutput.status.collectAsState()
+    val isSpeaking by speechOutput.isSpeaking.collectAsState()
+    var readAloud by rememberSaveable { mutableStateOf(true) }
+    val currentReadAloud by rememberUpdatedState(readAloud)
+
+    DisposableEffect(speechOutput, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) speechOutput.stop()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            speechOutput.close()
+        }
+    }
+    LaunchedEffect(viewModel, speechOutput, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            viewModel.replySpeechEvents.collect { event ->
+                when (event) {
+                    ReplySpeechEvent.Start, ReplySpeechEvent.Cancel -> speechOutput.stop()
+                    is ReplySpeechEvent.Chunk -> if (currentReadAloud) speechOutput.enqueue(event.text)
+                }
+            }
+        }
+    }
 
     // 新しいメッセージが追加されたら一番下まで自動スクロール
     LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text) {
@@ -89,13 +129,23 @@ fun ChatScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = {
+                        readAloud = !readAloud
+                        if (!readAloud) speechOutput.stop()
+                    }) {
+                        Icon(
+                            imageVector = if (readAloud) Icons.AutoMirrored.Filled.VolumeUp
+                                else Icons.AutoMirrored.Filled.VolumeOff,
+                            contentDescription = if (readAloud) "読み上げをオフにする" else "読み上げをオンにする"
+                        )
+                    }
                     IconButton(onClick = { viewModel.checkLlmStatus() }, enabled = historyLoaded && !isGenerating && modelStatus != ModelStatus.Checking) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = "ステータス再確認"
                         )
                     }
-                    IconButton(onClick = { viewModel.clearHistory() }, enabled = historyLoaded && !isGenerating) {
+                    IconButton(onClick = { speechOutput.stop(); viewModel.clearHistory() }, enabled = historyLoaded && !isGenerating) {
                         Icon(
                             imageVector = Icons.Default.Delete,
                             contentDescription = "履歴消去"
@@ -139,6 +189,18 @@ fun ChatScreen(
                 Text(status.reason, modifier = Modifier.padding(16.dp))
             }
 
+            if (readAloud) {
+                speechStatus?.let { status ->
+                    Text(status, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+                if (isSpeaking) {
+                    Text("読み上げ中… スピーカーボタンで停止できます。",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                }
+            }
+
             voiceInputStatus?.let { status ->
                 Text(
                     text = status,
@@ -169,7 +231,8 @@ fun ChatScreen(
                             OfflineVoiceInputButton(
                                 enabled = !isGenerating,
                                 onRecognized = { inputText += it },
-                                onStatus = { voiceInputStatus = it }
+                                onStatus = { voiceInputStatus = it },
+                                onStart = { speechOutput.stop() }
                             )
                         },
                         enabled = !isGenerating
@@ -179,6 +242,7 @@ fun ChatScreen(
 
                     IconButton(
                         onClick = {
+                            speechOutput.stop()
                             val textToSend = inputText
                             inputText = ""
                             viewModel.sendMessage(textToSend)
@@ -297,7 +361,7 @@ fun ChatMessageBubble(message: ChatMessage) {
                             }
                         }
                         Spacer(modifier = Modifier.size(4.dp))
-                        Text(
+                        MarkdownReply(
                             text = message.text.ifEmpty { "思考中..." },
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )

@@ -7,11 +7,15 @@ import com.abplus.botchchat.data.AiCoreLlmManager
 import com.abplus.botchchat.data.AiCoreLlmManager.ModelStatus
 import com.abplus.botchchat.data.ChatHistory
 import com.abplus.botchchat.data.ChatHistoryStore
+import com.abplus.botchchat.data.StreamingSpeechBuffer
+import com.abplus.botchchat.data.ReplySpeechEvent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -33,6 +37,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _historyError = MutableStateFlow<String?>(null)
     val historyError = _historyError.asStateFlow()
     private var statusJob: Job? = null
+    // Transient events: restored history must never trigger speech.
+    private val _replySpeechEvents = MutableSharedFlow<ReplySpeechEvent>()
+    internal val replySpeechEvents = _replySpeechEvents.asSharedFlow()
 
     init {
         viewModelScope.launch {
@@ -59,8 +66,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private suspend fun persistHistory(): Boolean {
-        val snapshot = _messages.value
+    private suspend fun persistHistory(snapshot: List<ChatMessage> = _messages.value): Boolean {
         return try {
             withContext(Dispatchers.IO) { historyStore.save(snapshot) }
             _historyError.value = null
@@ -85,26 +91,45 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Context contains only retained messages preceding this request, never the request twice.
         val history = _messages.value.dropLast(2)
         viewModelScope.launch {
-            var accumulated = ""
+            val speechBuffer = StreamingSpeechBuffer()
+            val accumulated = StringBuilder()
             var completed = false
             var lastSaved = System.nanoTime()
+            var lastDisplayed = lastSaved
             try {
                 check(persistHistory()) { "履歴を保存できなかったため送信を中止しました。" }
+                _replySpeechEvents.emit(ReplySpeechEvent.Start)
                 llmManager.generateResponseStream(text, history).collect { chunk ->
-                    accumulated += chunk
-                    updateAssistant(assistant.id, accumulated, streaming = true, completed = false)
-                    if (System.nanoTime() - lastSaved >= 500_000_000L) {
-                        persistHistory()
+                    accumulated.append(chunk)
+                    // Deliver speech first. Unbuffered events hand control to the active UI collector.
+                    speechBuffer.append(chunk).forEach { spoken ->
+                        _replySpeechEvents.emit(ReplySpeechEvent.Chunk(spoken))
+                    }
+                    val now = System.nanoTime()
+                    if (now - lastDisplayed >= 300_000_000L) {
+                        updateAssistant(assistant.id, accumulated.toString(), streaming = true, completed = false)
+                        lastDisplayed = now
+                    }
+                    if (now - lastSaved >= 500_000_000L) {
+                        // Save all received text, including text not yet published to the screen.
+                        persistHistory(_messages.value.map { message ->
+                            if (message.id == assistant.id) message.copy(text = accumulated.toString()) else message
+                        })
                         lastSaved = System.nanoTime()
                     }
                 }
+                speechBuffer.finish().forEach { spoken ->
+                    _replySpeechEvents.emit(ReplySpeechEvent.Chunk(spoken))
+                }
                 completed = accumulated.isNotBlank()
             } catch (e: CancellationException) {
+                withContext(NonCancellable) { _replySpeechEvents.emit(ReplySpeechEvent.Cancel) }
                 throw e
             } catch (e: Exception) {
-                accumulated += "\n[エラーが発生しました: ${e.localizedMessage}]"
+                _replySpeechEvents.emit(ReplySpeechEvent.Cancel)
+                accumulated.append("\n[エラーが発生しました: ${e.localizedMessage}]")
             } finally {
-                updateAssistant(assistant.id, accumulated.ifEmpty { "レスポンスを取得できませんでした。" },
+                updateAssistant(assistant.id, accumulated.toString().ifEmpty { "レスポンスを取得できませんでした。" },
                     streaming = false, completed = completed)
                 withContext(NonCancellable) { persistHistory() }
                 _isGenerating.value = false
