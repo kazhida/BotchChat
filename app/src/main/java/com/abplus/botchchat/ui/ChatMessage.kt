@@ -13,5 +13,6 @@ data class ChatMessage(
     val sender: Sender,
     val text: String,
     val timestamp: Long = System.currentTimeMillis(),
-    val isStreaming: Boolean = false
+    val isStreaming: Boolean = false,
+    val includeInContext: Boolean = true
 )

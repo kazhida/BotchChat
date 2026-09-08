@@ -60,12 +60,15 @@ fun ChatScreen(
     val messages by viewModel.messages.collectAsState()
     val modelStatus by viewModel.modelStatus.collectAsState()
     val isGenerating by viewModel.isGenerating.collectAsState()
+    val historyLoaded by viewModel.historyLoaded.collectAsState()
+    val historyError by viewModel.historyError.collectAsState()
 
     var inputText by remember { mutableStateOf("") }
+    var voiceInputStatus by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
     // 新しいメッセージが追加されたら一番下まで自動スクロール
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text) {
+    LaunchedEffect(messages.lastOrNull()?.id, messages.lastOrNull()?.text) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
         }
@@ -86,13 +89,13 @@ fun ChatScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.checkLlmStatus() }) {
+                    IconButton(onClick = { viewModel.checkLlmStatus() }, enabled = historyLoaded && !isGenerating && modelStatus != ModelStatus.Checking) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = "ステータス再確認"
                         )
                     }
-                    IconButton(onClick = { viewModel.clearHistory() }) {
+                    IconButton(onClick = { viewModel.clearHistory() }, enabled = historyLoaded && !isGenerating) {
                         Icon(
                             imageVector = Icons.Default.Delete,
                             contentDescription = "履歴消去"
@@ -125,6 +128,25 @@ fun ChatScreen(
                 }
             }
 
+            if (!historyLoaded && historyError == null) {
+                Text("会話履歴を読み込み中…", modifier = Modifier.padding(16.dp))
+            }
+            historyError?.let { error ->
+                Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp))
+            }
+
+            (modelStatus as? ModelStatus.NotAvailable)?.let { status ->
+                Text(status.reason, modifier = Modifier.padding(16.dp))
+            }
+
+            voiceInputStatus?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+            }
+
             // テキスト入力部分
             Surface(
                 tonalElevation = 3.dp,
@@ -139,10 +161,17 @@ fun ChatScreen(
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        placeholder = { Text("Gemma-4 (AICore) にメッセージ...") },
+                        placeholder = { Text("Gemma 4 E2B にメッセージ...") },
                         modifier = Modifier.weight(1f),
                         maxLines = 4,
                         shape = RoundedCornerShape(24.dp),
+                        trailingIcon = {
+                            OfflineVoiceInputButton(
+                                enabled = !isGenerating,
+                                onRecognized = { inputText += it },
+                                onStatus = { voiceInputStatus = it }
+                            )
+                        },
                         enabled = !isGenerating
                     )
 
@@ -154,11 +183,11 @@ fun ChatScreen(
                             inputText = ""
                             viewModel.sendMessage(textToSend)
                         },
-                        enabled = inputText.isNotBlank() && !isGenerating,
+                        enabled = inputText.isNotBlank() && historyLoaded && !isGenerating && modelStatus == ModelStatus.Ready,
                         modifier = Modifier
                             .size(48.dp)
                             .background(
-                                color = if (inputText.isNotBlank() && !isGenerating)
+                                color = if (inputText.isNotBlank() && historyLoaded && !isGenerating && modelStatus == ModelStatus.Ready)
                                     MaterialTheme.colorScheme.primary
                                 else
                                     MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -191,10 +220,9 @@ fun ChatScreen(
 @Composable
 fun ModelStatusBadge(status: ModelStatus) {
     val (text, color) = when (status) {
-        ModelStatus.Ready -> "Gemma-4 / AICore: Ready (On-Device)" to Color(0xFF4CAF50)
-        is ModelStatus.Downloading -> "Gemma-4: ダウンロード中..." to Color(0xFFFF9800)
-        is ModelStatus.NotAvailable -> "AICore: ローカルエミュレーション" to Color(0xFF2196F3)
-        ModelStatus.Checking -> "AICore: ステータス確認中..." to Color.Gray
+        ModelStatus.Ready -> "Gemma 4 E2B: Ready (On-Device)" to Color(0xFF4CAF50)
+        is ModelStatus.NotAvailable -> "Gemma 4 E2B: 利用不可" to Color(0xFF2196F3)
+        ModelStatus.Checking -> "Gemma 4 E2B: 読み込み中..." to Color.Gray
     }
 
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -248,7 +276,7 @@ fun ChatMessageBubble(message: ChatMessage) {
                     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "Gemma-4 (AICore)",
+                                text = "Gemma 4 E2B",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.primary

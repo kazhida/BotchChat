@@ -5,113 +5,138 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.abplus.botchchat.data.AiCoreLlmManager
 import com.abplus.botchchat.data.AiCoreLlmManager.ModelStatus
+import com.abplus.botchchat.data.ChatHistory
+import com.abplus.botchchat.data.ChatHistoryStore
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.UUID
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
-
     private val llmManager = AiCoreLlmManager(application.applicationContext)
-
+    private val historyStore = ChatHistoryStore(File(application.filesDir, "chat-history.json"))
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
-    val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
-
+    val messages = _messages.asStateFlow()
     private val _modelStatus = MutableStateFlow<ModelStatus>(ModelStatus.Checking)
-    val modelStatus: StateFlow<ModelStatus> = _modelStatus.asStateFlow()
-
+    val modelStatus = _modelStatus.asStateFlow()
     private val _isGenerating = MutableStateFlow(false)
-    val isGenerating: StateFlow<Boolean> = _isGenerating.asStateFlow()
+    val isGenerating = _isGenerating.asStateFlow()
+    private val _historyLoaded = MutableStateFlow(false)
+    val historyLoaded = _historyLoaded.asStateFlow()
+    private val _historyError = MutableStateFlow<String?>(null)
+    val historyError = _historyError.asStateFlow()
+    private var statusJob: Job? = null
 
     init {
-        checkLlmStatus()
-    }
-
-    fun checkLlmStatus() {
         viewModelScope.launch {
-            _modelStatus.value = ModelStatus.Checking
-            val status = llmManager.checkModelStatus()
-            _modelStatus.value = status
-
-            if (_messages.value.isEmpty()) {
-                val welcomeText = when (status) {
-                    is ModelStatus.Ready -> "AICore と Gemma-4 ローカル LLM の準備が完了しました。チャットを開始できます！"
-                    is ModelStatus.Downloading -> "ローカル LLM (Gemma-4) モデルの準備中です..."
-                    is ModelStatus.NotAvailable -> "注意: ${status.reason}（ローカルエミュレーションモードで試すことができます）"
-                    ModelStatus.Checking -> "AICore モデルステータスを確認中..."
+            try {
+                _messages.value = withContext(Dispatchers.IO) { historyStore.load() }
+                // Persist pruning and finalize any response interrupted by the previous process.
+                if (persistHistory()) {
+                    _historyLoaded.value = true
+                    checkLlmStatus()
                 }
-                _messages.value = listOf(
-                    ChatMessage(sender = Sender.SYSTEM, text = welcomeText)
-                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _historyError.value = "履歴を読み込めません。保存済みファイルは変更していません: ${e.localizedMessage}"
             }
         }
     }
 
-    fun sendMessage(userText: String) {
-        val trimmedText = userText.trim()
-        if (trimmedText.isEmpty() || _isGenerating.value) return
-
-        val userMessage = ChatMessage(sender = Sender.USER, text = trimmedText)
-        val assistantMessageId = UUID.randomUUID().toString()
-        val initialAssistantMessage = ChatMessage(
-            id = assistantMessageId,
-            sender = Sender.ASSISTANT,
-            text = "",
-            isStreaming = true
-        )
-
-        _messages.update { currentList ->
-            currentList + userMessage + initialAssistantMessage
+    fun checkLlmStatus() {
+        if (!_historyLoaded.value || _isGenerating.value || statusJob?.isActive == true) return
+        statusJob = viewModelScope.launch {
+            _modelStatus.value = ModelStatus.Checking
+            _modelStatus.value = llmManager.checkModelStatus()
         }
+    }
 
+    private suspend fun persistHistory(): Boolean {
+        val snapshot = _messages.value
+        return try {
+            withContext(Dispatchers.IO) { historyStore.save(snapshot) }
+            _historyError.value = null
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _historyError.value = "履歴を保存できません: ${e.localizedMessage}"
+            false
+        }
+    }
+
+    fun sendMessage(userText: String) {
+        val text = userText.trim()
+        if (text.isEmpty() || !_historyLoaded.value || _isGenerating.value ||
+            _modelStatus.value != ModelStatus.Ready) return
+        _isGenerating.value = true
+        val userMessage = ChatMessage(sender = Sender.USER, text = text)
+        val assistant = ChatMessage(sender = Sender.ASSISTANT, text = "", isStreaming = true,
+            includeInContext = false)
+        _messages.update { (it + userMessage + assistant).takeLast(ChatHistory.MAX_MESSAGES) }
+        // Context contains only retained messages preceding this request, never the request twice.
+        val history = _messages.value.dropLast(2)
         viewModelScope.launch {
-            _isGenerating.value = true
-            var accumulatedText = ""
-
+            var accumulated = ""
+            var completed = false
+            var lastSaved = System.nanoTime()
             try {
-                llmManager.generateResponseStream(trimmedText).collect { chunk ->
-                    accumulatedText += chunk
-                    _messages.update { currentList ->
-                        currentList.map { message ->
-                            if (message.id == assistantMessageId) {
-                                message.copy(
-                                    text = accumulatedText,
-                                    isStreaming = true
-                                )
-                            } else {
-                                message
-                            }
-                        }
+                check(persistHistory()) { "履歴を保存できなかったため送信を中止しました。" }
+                llmManager.generateResponseStream(text, history).collect { chunk ->
+                    accumulated += chunk
+                    updateAssistant(assistant.id, accumulated, streaming = true, completed = false)
+                    if (System.nanoTime() - lastSaved >= 500_000_000L) {
+                        persistHistory()
+                        lastSaved = System.nanoTime()
                     }
                 }
+                completed = accumulated.isNotBlank()
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                accumulatedText += "\n[エラーが発生しました: ${e.localizedMessage}]"
+                accumulated += "\n[エラーが発生しました: ${e.localizedMessage}]"
             } finally {
-                _messages.update { currentList ->
-                    currentList.map { message ->
-                        if (message.id == assistantMessageId) {
-                            message.copy(
-                                text = accumulatedText.ifEmpty { "レスポンスを取得できませんでした。" },
-                                isStreaming = false
-                            )
-                        } else {
-                            message
-                        }
-                    }
-                }
+                updateAssistant(assistant.id, accumulated.ifEmpty { "レスポンスを取得できませんでした。" },
+                    streaming = false, completed = completed)
+                withContext(NonCancellable) { persistHistory() }
                 _isGenerating.value = false
             }
         }
     }
 
+    private fun updateAssistant(id: String, text: String, streaming: Boolean, completed: Boolean) {
+        _messages.update { messages ->
+            messages.map { message ->
+                if (message.id == id) message.copy(text = text, isStreaming = streaming,
+                    includeInContext = completed) else message
+            }
+        }
+    }
+
     fun clearHistory() {
-        _messages.value = listOf(
-            ChatMessage(
-                sender = Sender.SYSTEM,
-                text = "チャット履歴を消去しました。Gemma-4 / AICore に質問してみましょう。"
-            )
-        )
+        if (_isGenerating.value || !_historyLoaded.value) return
+        _isGenerating.value = true
+        viewModelScope.launch {
+            val previous = _messages.value
+            _messages.value = emptyList()
+            try {
+                if (!persistHistory()) _messages.value = previous
+            } finally {
+                _isGenerating.value = false
+            }
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        CoroutineScope(Dispatchers.IO).launch { llmManager.close() }
     }
 }
