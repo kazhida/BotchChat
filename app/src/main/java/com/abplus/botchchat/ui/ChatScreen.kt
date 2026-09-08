@@ -27,6 +27,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -77,6 +79,7 @@ fun ChatScreen(
 
     var inputText by remember { mutableStateOf("") }
     var voiceInputStatus by remember { mutableStateOf<String?>(null) }
+    var showDeleteConfirmation by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -114,6 +117,31 @@ fun ChatScreen(
         }
     }
 
+    if (showDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            title = { Text("会話履歴を削除しますか？") },
+            text = { Text("保存済みの会話履歴と会話のコンテキストをすべて削除します。この操作は取り消せません。") },
+            confirmButton = {
+                TextButton(
+                    enabled = historyLoaded && !isGenerating,
+                    onClick = {
+                        showDeleteConfirmation = false
+                        speechOutput.stop()
+                        viewModel.clearHistory()
+                    }
+                ) {
+                    Text("削除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmation = false }) {
+                    Text("キャンセル")
+                }
+            }
+        )
+    }
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -145,7 +173,7 @@ fun ChatScreen(
                             contentDescription = "ステータス再確認"
                         )
                     }
-                    IconButton(onClick = { speechOutput.stop(); viewModel.clearHistory() }, enabled = historyLoaded && !isGenerating) {
+                    IconButton(onClick = { showDeleteConfirmation = true }, enabled = historyLoaded && !isGenerating) {
                         Icon(
                             imageVector = Icons.Default.Delete,
                             contentDescription = "履歴消去"
@@ -223,7 +251,7 @@ fun ChatScreen(
                     OutlinedTextField(
                         value = inputText,
                         onValueChange = { inputText = it },
-                        placeholder = { Text("Gemma 4 E2B にメッセージ...") },
+                        placeholder = { Text("BotchChatにつぶやく...") },
                         modifier = Modifier.weight(1f),
                         maxLines = 4,
                         shape = RoundedCornerShape(24.dp),
