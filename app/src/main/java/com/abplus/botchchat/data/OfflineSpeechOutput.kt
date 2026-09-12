@@ -132,9 +132,13 @@ class OfflineSpeechOutput(context: Context) : AutoCloseable {
     }
 
     override fun close() {
+        if (closed) return
         closed = true
+        handler.removeCallbacksAndMessages(null)
         stop()
-        runCatching { tts?.shutdown() }
+        val engine = tts
         tts = null
+        runCatching { engine?.setOnUtteranceProgressListener(null) }
+        runCatching { engine?.shutdown() }
     }
 }

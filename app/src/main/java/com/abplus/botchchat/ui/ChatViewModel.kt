@@ -14,12 +14,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -37,6 +40,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _historyError = MutableStateFlow<String?>(null)
     val historyError = _historyError.asStateFlow()
     private var statusJob: Job? = null
+    private val actionMutex = Mutex()
+    private val closeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Transient events: restored history must never trigger speech.
     private val _replySpeechEvents = MutableSharedFlow<ReplySpeechEvent>()
     internal val replySpeechEvents = _replySpeechEvents.asSharedFlow()
@@ -94,8 +99,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendMessage(userText: String) {
         val text = userText.trim()
-        if (text.isEmpty() || !_historyLoaded.value || _isGenerating.value ||
-            _modelStatus.value != ModelStatus.Ready) return
+        if (text.isEmpty() || !_historyLoaded.value ||
+            _modelStatus.value != ModelStatus.Ready || !actionMutex.tryLock()) return
+        if (_isGenerating.value) {
+            actionMutex.unlock()
+            return
+        }
         _isGenerating.value = true
         val userMessage = ChatMessage(sender = Sender.USER, text = text)
         val assistant = ChatMessage(sender = Sender.ASSISTANT, text = "", isStreaming = true,
@@ -146,6 +155,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     streaming = false, completed = completed)
                 withContext(NonCancellable) { persistHistory() }
                 _isGenerating.value = false
+                actionMutex.unlock()
             }
         }
     }
@@ -160,7 +170,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearHistory() {
-        if (_isGenerating.value || !_historyLoaded.value) return
+        if (!_historyLoaded.value || !actionMutex.tryLock()) return
+        if (_isGenerating.value) {
+            actionMutex.unlock()
+            return
+        }
         _isGenerating.value = true
         viewModelScope.launch {
             val previous = _messages.value
@@ -169,12 +183,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 if (!persistHistory()) _messages.value = previous
             } finally {
                 _isGenerating.value = false
+                actionMutex.unlock()
             }
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-        CoroutineScope(Dispatchers.IO).launch { llmManager.close() }
+        closeScope.launch {
+            try {
+                llmManager.close()
+            } finally {
+                closeScope.cancel()
+            }
+        }
     }
 }

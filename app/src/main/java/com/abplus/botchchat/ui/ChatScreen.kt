@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.TextButton
@@ -47,7 +48,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import com.abplus.botchchat.data.OfflineSpeechOutput
 import com.abplus.botchchat.data.ReplySpeechEvent
 import androidx.compose.runtime.LaunchedEffect
@@ -100,12 +100,15 @@ fun ChatScreen(
         }
     }
     LaunchedEffect(viewModel, speechOutput, lifecycleOwner) {
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            viewModel.replySpeechEvents.collect { event ->
-                when (event) {
-                    ReplySpeechEvent.Start, ReplySpeechEvent.Cancel -> speechOutput.stop()
-                    is ReplySpeechEvent.Chunk -> if (currentReadAloud) speechOutput.enqueue(event.text)
-                }
+        // Keep one collector alive so SharedFlow events cannot be stranded
+        // while repeatOnLifecycle is restarting the collection.
+        viewModel.replySpeechEvents.collect { event ->
+            if (!lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+                return@collect
+            }
+            when (event) {
+                ReplySpeechEvent.Start, ReplySpeechEvent.Cancel -> speechOutput.stop()
+                is ReplySpeechEvent.Chunk -> if (currentReadAloud) speechOutput.enqueue(event.text)
             }
         }
     }
@@ -383,9 +386,9 @@ fun ChatMessageBubble(message: ChatMessage) {
                     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "Gemma 4 E2B",
+                                text = "Botch >",
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
+                                fontSize = 13.sp,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             AnimatedVisibility(
@@ -401,6 +404,13 @@ fun ChatMessageBubble(message: ChatMessage) {
                                         color = MaterialTheme.colorScheme.primary
                                     )
                                 }
+                            }
+                            Spacer(modifier = Modifier.weight(1f))
+                            IconButton(onClick = {}) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share note"
+                                )
                             }
                         }
                         Spacer(modifier = Modifier.size(4.dp))
