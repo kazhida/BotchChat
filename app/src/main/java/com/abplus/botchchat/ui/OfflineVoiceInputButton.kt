@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Build
 import android.speech.RecognitionListener
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
@@ -57,7 +58,19 @@ internal fun OfflineVoiceInputButton(
         if (!currentEnabled || recognizer != null ||
             !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         ) return
-        if (!SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+        // On-device recognition APIs were added in Android 12 (API 31).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            currentOnStatus("Android 12以降でオフライン音声認識を利用できます。")
+            return
+        }
+        // Resolve this API reflectively as some Android 11 builds do not expose
+        // the method even when the app was compiled with a newer SDK.
+        val onDeviceAvailable = runCatching {
+            SpeechRecognizer::class.java
+                .getMethod("isOnDeviceRecognitionAvailable", android.content.Context::class.java)
+                .invoke(null, context) as Boolean
+        }.getOrDefault(false)
+        if (!onDeviceAvailable) {
             currentOnStatus("この端末はオフライン音声認識に対応していません。")
             return
         }
@@ -109,26 +122,34 @@ internal fun OfflineVoiceInputButton(
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
             })
             currentOnStatus("オフライン音声認識を準備しています…")
-            active.checkRecognitionSupport(intent, context.mainExecutor, object : RecognitionSupportCallback {
-                override fun onSupportResult(support: RecognitionSupport) {
-                    if (recognizer !== active) return
-                    val japaneseInstalled = support.installedOnDeviceLanguages.any {
-                        Locale.forLanguageTag(it.replace('_', '-')).language == "ja"
-                    }
-                    if (!japaneseInstalled) {
-                        fail("日本語のオフライン音声認識モデルが端末にありません。事前に端末の音声入力設定で準備してください。")
-                        return
-                    }
-                    try {
-                        active.startListening(intent)
-                    } catch (_: RuntimeException) {
-                        fail("オフライン音声認識を開始できませんでした。")
-                    }
+            fun startListening() {
+                try {
+                    active.startListening(intent)
+                } catch (_: RuntimeException) {
+                    fail("オフライン音声認識を開始できませんでした。")
                 }
-                override fun onError(error: Int) {
-                    fail("オフライン音声認識の利用可否を確認できませんでした（$error）。")
-                }
-            })
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                active.checkRecognitionSupport(intent, context.mainExecutor, object : RecognitionSupportCallback {
+                    override fun onSupportResult(support: RecognitionSupport) {
+                        if (recognizer !== active) return
+                        val japaneseInstalled = support.installedOnDeviceLanguages.any {
+                            Locale.forLanguageTag(it.replace('_', '-')).language == "ja"
+                        }
+                        if (!japaneseInstalled) {
+                            fail("日本語のオフライン音声認識モデルが端末にありません。事前に端末の音声入力設定で準備してください。")
+                            return
+                        }
+                        startListening()
+                    }
+                    override fun onError(error: Int) {
+                        fail("オフライン音声認識の利用可否を確認できませんでした（$error）。")
+                    }
+                })
+            } else {
+                // checkRecognitionSupport() was added after Android 12.
+                startListening()
+            }
         } catch (_: RuntimeException) {
             release()
             currentOnStatus("オフライン音声認識を開始できませんでした。")

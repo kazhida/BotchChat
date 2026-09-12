@@ -214,7 +214,21 @@ fun ChatScreen(
             }
 
             (modelStatus as? ModelStatus.NotAvailable)?.let { status ->
-                Text(status.reason, modifier = Modifier.padding(16.dp))
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text(status.reason)
+                    TextButton(
+                        onClick = { viewModel.downloadModel() },
+                        enabled = historyLoaded && !isGenerating
+                    ) { Text("モデルをダウンロード") }
+                }
+            }
+            (modelStatus as? ModelStatus.Downloading)?.let { status ->
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Text("Gemma 4 E2Bをダウンロード中…")
+                    status.percent?.let { Text("$it%") }
+                    if (status.percent == null) CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                    else CircularProgressIndicator(progress = { status.percent / 100f })
+                }
             }
 
             if (readAloud) {
@@ -314,6 +328,7 @@ fun ModelStatusBadge(status: ModelStatus) {
     val (text, color) = when (status) {
         ModelStatus.Ready -> "Gemma 4 E2B: Ready (On-Device)" to Color(0xFF4CAF50)
         is ModelStatus.NotAvailable -> "Gemma 4 E2B: 利用不可" to Color(0xFF2196F3)
+        is ModelStatus.Downloading -> "Gemma 4 E2B: ダウンロード中" to Color(0xFFFF9800)
         ModelStatus.Checking -> "Gemma 4 E2B: 読み込み中..." to Color.Gray
     }
 

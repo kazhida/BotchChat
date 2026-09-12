@@ -2,7 +2,7 @@
 
 LiteRT-LM 0.13.1 の CPU バックエンドで、端末に配置した
 `gemma-4-E2B-it.litertlm` を読み込みます。クラウド API、AICore、定型応答への
-フォールバックは使用しません。音声入力は別途 Android のオフライン音声認識を使用します。
+フォールバックは使用しません。初回のモデル取得だけはHugging Faceから行い、取得後の推論は端末内で実行します。音声入力は別途 Android のオフライン音声認識を使用します。
 
 ## モデルの準備
 
@@ -13,7 +13,13 @@ Android 用の `gemma-4-E2B-it.litertlm` を取得してください。
 Web / GPU / NPU 専用版ではありません。モデルは数 GB あるため、APK には含めません。
 配布元の利用条件を確認し、オフライン利用前にモデルを端末へ配置します。
 
-開発端末では、アプリをインストールして一度起動した後、次のコマンドで配置できます。
+アプリ起動後に「モデルをダウンロード」を押すと、アプリが次のURLから取得して適切な場所へ配置します。
+
+```text
+https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm
+```
+
+開発端末では、手動で次のように配置することもできます。
 
 ```sh
 adb shell mkdir -p /sdcard/Android/data/com.abplus.botchchat/files/models

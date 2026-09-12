@@ -18,16 +18,21 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** Runs a locally provisioned Gemma 4 E2B model using LiteRT-LM, without network access. */
 class AiCoreLlmManager(private val context: Context) {
     companion object {
         const val MODEL_NAME = "Gemma 4 E2B"
         const val MODEL_FILE_NAME = "gemma-4-E2B-it.litertlm"
+        private const val MODEL_URL =
+            "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
     }
 
     sealed interface ModelStatus {
         data object Checking : ModelStatus
+        data class Downloading(val percent: Int?) : ModelStatus
         data object Ready : ModelStatus
         data class NotAvailable(val reason: String) : ModelStatus
     }
@@ -70,6 +75,54 @@ class AiCoreLlmManager(private val context: Context) {
             } catch (e: LinkageError) {
                 runCatching { candidate?.close() }
                 ModelStatus.NotAvailable("この端末では推論ライブラリを利用できません: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    suspend fun downloadModel(onProgress: (Int?) -> Unit): ModelStatus = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            if (closed) return@withLock ModelStatus.NotAvailable("モデルは終了しています。")
+            val destination = modelFile()
+            val temporary = File(destination.parentFile, "$MODEL_FILE_NAME.download")
+            var connection: HttpURLConnection? = null
+            try {
+                onProgress(null)
+                connection = (URL(MODEL_URL).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 20_000
+                    readTimeout = 60_000
+                    instanceFollowRedirects = true
+                    requestMethod = "GET"
+                }
+                connection.connect()
+                if (connection.responseCode !in 200..299) {
+                    throw IllegalStateException("HTTP ${connection.responseCode}")
+                }
+                val total = connection.contentLengthLong
+                var downloaded = 0L
+                connection.inputStream.buffered().use { input ->
+                    temporary.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        var count: Int
+                        while (input.read(buffer).also { count = it } != -1) {
+                            output.write(buffer, 0, count)
+                            downloaded += count
+                            onProgress(if (total > 0) ((downloaded * 100) / total).toInt() else null)
+                        }
+                    }
+                }
+                if (temporary.length() == 0L) throw IllegalStateException("空のファイルです")
+                if (!temporary.renameTo(destination)) {
+                    throw IllegalStateException("モデルファイルを配置できません")
+                }
+                ModelStatus.Ready
+            } catch (e: CancellationException) {
+                temporary.delete()
+                throw e
+            } catch (e: Exception) {
+                temporary.delete()
+                ModelStatus.NotAvailable("モデルのダウンロードに失敗しました: ${e.localizedMessage}")
+            } finally {
+                connection?.disconnect()
             }
         }
     }

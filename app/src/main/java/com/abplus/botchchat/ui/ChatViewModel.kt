@@ -66,6 +66,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun downloadModel() {
+        if (!_historyLoaded.value || _isGenerating.value || statusJob?.isActive == true) return
+        statusJob = viewModelScope.launch {
+            _modelStatus.value = ModelStatus.Downloading(null)
+            _modelStatus.value = llmManager.downloadModel { percent ->
+                _modelStatus.value = ModelStatus.Downloading(percent)
+            }
+            if (_modelStatus.value == ModelStatus.Ready) {
+                _modelStatus.value = llmManager.checkModelStatus()
+            }
+        }
+    }
+
     private suspend fun persistHistory(snapshot: List<ChatMessage> = _messages.value): Boolean {
         return try {
             withContext(Dispatchers.IO) { historyStore.save(snapshot) }
