@@ -22,7 +22,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /** Runs a locally provisioned Gemma 4 E2B model using LiteRT-LM, without network access. */
-class AiCoreLlmManager(private val context: Context) {
+class LiteRtLmManager(private val context: Context) {
     companion object {
         const val MODEL_NAME = "Gemma 4 E2B"
         const val MODEL_FILE_NAME = "gemma-4-E2B-it.litertlm"

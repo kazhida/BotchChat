@@ -1,5 +1,6 @@
 package com.abplus.botchchat.ui
 
+import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -63,7 +64,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.abplus.botchchat.data.AiCoreLlmManager.ModelStatus
+import com.abplus.botchchat.data.LiteRtLmManager.ModelStatus
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,6 +89,10 @@ fun ChatScreen(
     val isSpeaking by speechOutput.isSpeaking.collectAsState()
     var readAloud by rememberSaveable { mutableStateOf(true) }
     val currentReadAloud by rememberUpdatedState(readAloud)
+
+    LaunchedEffect(viewModel, readAloud) {
+        viewModel.setReadAloudEnabled(readAloud)
+    }
 
     DisposableEffect(speechOutput, lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -161,16 +166,21 @@ fun ChatScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        readAloud = !readAloud
-                        if (!readAloud) speechOutput.stop()
+                        val enabled = !readAloud
+                        readAloud = enabled
+                        viewModel.setReadAloudEnabled(enabled)
+                        if (!enabled) speechOutput.stop()
                     }) {
                         Icon(
                             imageVector = if (readAloud) Icons.AutoMirrored.Filled.VolumeUp
-                                else Icons.AutoMirrored.Filled.VolumeOff,
+                            else Icons.AutoMirrored.Filled.VolumeOff,
                             contentDescription = if (readAloud) "読み上げをオフにする" else "読み上げをオンにする"
                         )
                     }
-                    IconButton(onClick = { viewModel.checkLlmStatus() }, enabled = historyLoaded && !isGenerating && modelStatus != ModelStatus.Checking) {
+                    IconButton(
+                        onClick = { viewModel.checkLlmStatus() },
+                        enabled = historyLoaded && !isGenerating && modelStatus != ModelStatus.Checking
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Refresh,
                             contentDescription = "ステータス再確認"
@@ -236,13 +246,17 @@ fun ChatScreen(
 
             if (readAloud) {
                 speechStatus?.let { status ->
-                    Text(status, style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                    Text(
+                        status, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
                 }
                 if (isSpeaking) {
-                    Text("読み上げ中… スピーカーボタンで停止できます。",
+                    Text(
+                        "読み上げ中… スピーカーボタンで停止できます。",
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
                 }
             }
 
@@ -353,6 +367,8 @@ fun ModelStatusBadge(status: ModelStatus) {
 
 @Composable
 fun ChatMessageBubble(message: ChatMessage) {
+    val context = LocalContext.current
+
     when (message.sender) {
         Sender.USER -> {
             Row(
@@ -406,10 +422,20 @@ fun ChatMessageBubble(message: ChatMessage) {
                                 }
                             }
                             Spacer(modifier = Modifier.weight(1f))
-                            IconButton(onClick = {}) {
+                            IconButton(
+                                onClick = {
+                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, message.text)
+                                    }
+                                    context.startActivity(Intent.createChooser(sendIntent, null))
+                                },
+                                modifier = Modifier.size(36.dp)
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.Share,
-                                    contentDescription = "Share note"
+                                    contentDescription = "Share note",
+                                    modifier = Modifier.size(18.dp)
                                 )
                             }
                         }

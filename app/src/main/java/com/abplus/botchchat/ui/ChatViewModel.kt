@@ -3,8 +3,8 @@ package com.abplus.botchchat.ui
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.abplus.botchchat.data.AiCoreLlmManager
-import com.abplus.botchchat.data.AiCoreLlmManager.ModelStatus
+import com.abplus.botchchat.data.LiteRtLmManager
+import com.abplus.botchchat.data.LiteRtLmManager.ModelStatus
 import com.abplus.botchchat.data.ChatHistory
 import com.abplus.botchchat.data.ChatHistoryStore
 import com.abplus.botchchat.data.StreamingSpeechBuffer
@@ -26,8 +26,12 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import java.io.File
 
+private const val NORMAL_DISPLAY_INTERVAL_NANOS = 300_000_000L
+private const val SPEECH_FIRST_DISPLAY_INTERVAL_NANOS = 1_000_000_000L
+private const val HISTORY_SAVE_INTERVAL_NANOS = 500_000_000L
+
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
-    private val llmManager = AiCoreLlmManager(application.applicationContext)
+    private val llmManager = LiteRtLmManager(application.applicationContext)
     private val historyStore = ChatHistoryStore(File(application.filesDir, "chat-history.json"))
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages = _messages.asStateFlow()
@@ -45,6 +49,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     // Transient events: restored history must never trigger speech.
     private val _replySpeechEvents = MutableSharedFlow<ReplySpeechEvent>()
     internal val replySpeechEvents = _replySpeechEvents.asSharedFlow()
+    private val _readAloud = MutableStateFlow(true)
 
     init {
         viewModelScope.launch {
@@ -97,6 +102,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setReadAloudEnabled(enabled: Boolean) {
+        _readAloud.value = enabled
+    }
+
     fun sendMessage(userText: String) {
         val text = userText.trim()
         if (text.isEmpty() || !_historyLoaded.value ||
@@ -113,26 +122,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // Context contains only retained messages preceding this request, never the request twice.
         val history = _messages.value.dropLast(2)
         viewModelScope.launch {
-            val speechBuffer = StreamingSpeechBuffer()
+            var speechBuffer = StreamingSpeechBuffer()
             val accumulated = StringBuilder()
             var completed = false
             var lastSaved = System.nanoTime()
             var lastDisplayed = lastSaved
             try {
                 check(persistHistory()) { "履歴を保存できなかったため送信を中止しました。" }
-                _replySpeechEvents.emit(ReplySpeechEvent.Start)
+                if (_readAloud.value) _replySpeechEvents.emit(ReplySpeechEvent.Start)
                 llmManager.generateResponseStream(text, history).collect { chunk ->
                     accumulated.append(chunk)
-                    // Deliver speech first. Unbuffered events hand control to the active UI collector.
-                    speechBuffer.append(chunk).forEach { spoken ->
-                        _replySpeechEvents.emit(ReplySpeechEvent.Chunk(spoken))
+                    val readAloud = _readAloud.value
+                    if (readAloud) {
+                        // Deliver speech first. Unbuffered events hand control to the active UI collector.
+                        speechBuffer.append(chunk).forEach { spoken ->
+                            _replySpeechEvents.emit(ReplySpeechEvent.Chunk(spoken))
+                        }
+                    } else {
+                        speechBuffer = StreamingSpeechBuffer()
                     }
                     val now = System.nanoTime()
-                    if (now - lastDisplayed >= 300_000_000L) {
+                    val displayInterval = if (readAloud) SPEECH_FIRST_DISPLAY_INTERVAL_NANOS
+                        else NORMAL_DISPLAY_INTERVAL_NANOS
+                    if (now - lastDisplayed >= displayInterval) {
                         updateAssistant(assistant.id, accumulated.toString(), streaming = true, completed = false)
                         lastDisplayed = now
                     }
-                    if (now - lastSaved >= 500_000_000L) {
+                    if (now - lastSaved >= HISTORY_SAVE_INTERVAL_NANOS) {
                         // Save all received text, including text not yet published to the screen.
                         persistHistory(_messages.value.map { message ->
                             if (message.id == assistant.id) message.copy(text = accumulated.toString()) else message
@@ -140,8 +156,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         lastSaved = System.nanoTime()
                     }
                 }
-                speechBuffer.finish().forEach { spoken ->
-                    _replySpeechEvents.emit(ReplySpeechEvent.Chunk(spoken))
+                if (_readAloud.value) {
+                    speechBuffer.finish().forEach { spoken ->
+                        _replySpeechEvents.emit(ReplySpeechEvent.Chunk(spoken))
+                    }
                 }
                 completed = accumulated.isNotBlank()
             } catch (e: CancellationException) {
